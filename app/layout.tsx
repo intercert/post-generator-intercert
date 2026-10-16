@@ -1,10 +1,8 @@
 import type { Metadata } from "next";
 import { Schibsted_Grotesk } from "next/font/google";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
 import BrandTheme from "@/components/BrandTheme";
-import DataBanner from "@/components/DataBanner";
-import LocalDataMigration from "@/components/LocalDataMigration";
 import { THEME_SCRIPT } from "@/components/theme-script";
 
 const schibsted = Schibsted_Grotesk({
@@ -26,14 +24,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       <body className="min-h-full">
         <BrandTheme />
-        <div className="app">
-          <Sidebar />
-          <div className="app-main">
-            <DataBanner />
-            <LocalDataMigration />
-            {children}
-          </div>
-        </div>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

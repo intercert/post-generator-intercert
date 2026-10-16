@@ -16,12 +16,16 @@
     "@google/genai": "^2.29.1",
     "@prisma/adapter-mariadb": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "clsx": "^2.1.1",
     "dotenv": "^18.0.8",
+    "framer-motion": "^14.3.0",
+    "lucide-react": "^1.58.0",
     "next": "16.4.0",
     "openai": "^7.33.0",
     "pdfjs-dist": "^6.4.299",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
