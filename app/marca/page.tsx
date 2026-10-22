@@ -14,10 +14,12 @@ import {
   type ColorKey,
   type FormatKind
 } from '@/lib/brand';
-import { cropToPng, dominantColors, fileToJpeg, type LogoBox } from '@/lib/image-tools';
+import { cropToPng, dominantColors, fileToJpeg, thumbnailJpeg, type LogoBox } from '@/lib/image-tools';
 import { isPdf, renderPdfPages } from '@/lib/pdf-tools';
 import { resetBrand, saveBrand, useBrand, useBrandConfigured, useBrandStatus } from '@/lib/use-brand';
 import { useProviders } from '@/lib/use-providers';
+import { MAX_SAMPLES_PER_KIND, SAMPLE_KINDS, SAMPLE_KIND_LABELS, SAMPLE_MAX_SIDE, type SampleInput } from '@/lib/samples';
+import { clearSampleCounts, saveSamples, useSampleCounts } from '@/lib/use-samples';
 
 type Provider = 'claude' | 'openai' | 'gemini';
 
@@ -46,6 +48,28 @@ interface Draft {
   brand: Brand;
   notes: string[];
   source: string;
+  /** Referências (miniaturas) dos arquivos analisados; só vão para o banco quando a pessoa salva. */
+  samples: SampleInput[];
+}
+
+/** Escolhe até `max` itens espalhados pela lista inteira, para a amostra não ser só os primeiros arquivos. */
+function spread<T>(items: T[], max: number): T[] {
+  if (items.length <= max) return items;
+  return Array.from({ length: max }, (_, i) => items[Math.floor((i * items.length) / max)]);
+}
+
+/** Reduz os arquivos enviados a poucas miniaturas por tipo (feed, story, manual) para usar de referência. */
+async function buildSamples(uploads: Upload[]): Promise<SampleInput[]> {
+  const samples: SampleInput[] = [];
+  for (const tipo of SAMPLE_KINDS) {
+    const ofKind = uploads.filter((u) => (u.origem === 'manual' ? 'manual' : u.formato) === tipo);
+    for (const u of spread(ofKind, MAX_SAMPLES_PER_KIND)) {
+      const thumb = await thumbnailJpeg(u.dataUrl, SAMPLE_MAX_SIDE);
+      const nome = u.origem === 'manual' ? `${u.name}, ${u.caption}` : u.name;
+      samples.push({ tipo, nome: nome.slice(0, 120), largura: thumb.width, altura: thumb.height, image: thumb.base64 });
+    }
+  }
+  return samples;
 }
 
 const SWATCHES: { key: ColorKey; label: string }[] = [
@@ -176,6 +200,7 @@ export default function BrandPage() {
   const { status: brandStatus } = useBrandStatus();
   const loadingBrand = brandStatus === 'loading';
   const available = useProviders();
+  const sampleCounts = useSampleCounts();
 
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [provider, setProvider] = useState<Provider>('claude');
@@ -347,7 +372,13 @@ export default function BrandPage() {
             manual: found.manual || saved.manual
           }
         : { ...found, logo };
-      setDraft({ brand: merged, notes, source: `Analisado por ${data.usedProvider}` });
+      let samples: SampleInput[] = [];
+      try {
+        samples = await buildSamples(uploads);
+      } catch {
+        notes.push('Não consegui guardar as miniaturas dos posts como referência; a identidade será salva sem elas.');
+      }
+      setDraft({ brand: merged, notes, source: `Analisado por ${data.usedProvider}`, samples });
     } catch (err) {
       if (controller.signal.aborted) return;
       setError(
@@ -363,14 +394,20 @@ export default function BrandPage() {
   }
 
   async function handleSave(brand: Brand) {
+    const samples = draft?.samples ?? [];
     const failure = await saveBrand(brand);
     setDraft(null);
     if (failure) {
       setError(failure);
       return;
     }
+    const samplesFailure = await saveSamples(samples);
     setUploads([]);
     setWantsUpload(false);
+    if (samplesFailure) {
+      setError(`A identidade foi salva, mas as referências visuais não: ${samplesFailure}`);
+      return;
+    }
     flash('Identidade visual salva. Os próximos posts já seguem este padrão.');
   }
 
@@ -378,7 +415,10 @@ export default function BrandPage() {
     if (!window.confirm('Voltar a identidade visual para o padrão? A identidade salva, inclusive a logo, será apagada.')) return;
     const failure = await resetBrand();
     if (failure) setError(failure);
-    else flash('Identidade restaurada para o padrão.');
+    else {
+      clearSampleCounts();
+      flash('Identidade restaurada para o padrão.');
+    }
   }
 
   return (
@@ -509,6 +549,16 @@ export default function BrandPage() {
                     <dt>Estilo das imagens</dt>
                     <dd>{saved.estiloImagem}</dd>
                   </div>
+                  <div>
+                    <dt>Referências da IA</dt>
+                    <dd>
+                      {SAMPLE_KINDS.some((k) => sampleCounts[k] > 0)
+                        ? `Guardadas: ${SAMPLE_KINDS.filter((k) => sampleCounts[k] > 0)
+                            .map((k) => `${sampleCounts[k]} ${SAMPLE_KIND_LABELS[k]}`)
+                            .join(', ')}. A IA de imagem usa algumas delas para criar a arte completa.`
+                        : 'Nenhuma guardada ainda. Use “Analisar novos posts” para a IA aprender com a arte dos seus posts.'}
+                    </dd>
+                  </div>
                   {saved.manual && (
                     <div>
                       <dt>Manual de identidade</dt>
@@ -522,7 +572,7 @@ export default function BrandPage() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => setDraft({ brand: saved, notes: [], source: '' })}
+                  onClick={() => setDraft({ brand: saved, notes: [], source: '', samples: [] })}
                 >
                   Editar identidade
                 </button>
@@ -566,8 +616,10 @@ export default function BrandPage() {
           <p className="hint">
             Envie de 3 a 8 posts já publicados, de preferência de temas diferentes e em boa resolução. Misture posts de feed e <strong>stories</strong>: a IA aprende o padrão de cada um separadamente. Ela reconhece o tipo pela proporção da imagem, e você pode trocar clicando na etiqueta &quot;Feed&quot;/&quot;Story&quot; de cada miniatura. Se a empresa tem um{' '}
             <strong>manual de identidade visual em PDF</strong>, envie também: as regras dele (cores oficiais, fontes, uso da
-            logo) valem mais que os posts e ficam salvas na identidade. Os arquivos são usados só nesta análise e não ficam
-            guardados.
+            logo) valem mais que os posts e ficam salvas na identidade. Os arquivos em si não ficam guardados, mas ao salvar a
+            identidade guardamos miniaturas de até {MAX_SAMPLES_PER_KIND} posts de feed, {MAX_SAMPLES_PER_KIND} stories e{' '}
+            {MAX_SAMPLES_PER_KIND} páginas do manual: a IA de imagem usa algumas delas como referência visual para criar a
+            arte completa de cada post.
           </p>
 
           <label

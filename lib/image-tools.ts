@@ -55,6 +55,31 @@ export async function fileToJpeg(file: File, max = 1280): Promise<LoadedImage> {
   return { dataUrl: canvas.toDataURL('image/jpeg', 0.85), width: canvas.width, height: canvas.height };
 }
 
+/** Miniatura JPEG (só o base64, sem o prefixo "data:") para guardar como referência visual no banco. */
+export async function thumbnailJpeg(dataUrl: string, max: number, quality = 0.78): Promise<{ base64: string; width: number; height: number }> {
+  const img = await loadElement(dataUrl);
+  const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const { canvas, ctx } = canvasOf(img.naturalWidth * k, img.naturalHeight * k);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const out = canvas.toDataURL('image/jpeg', quality);
+  return { base64: out.slice(out.indexOf(',') + 1), width: canvas.width, height: canvas.height };
+}
+
+/** Ajusta a imagem ao tamanho exato do formato (preenche e corta o excesso, como object-fit: cover) e devolve um PNG. */
+export async function coverToPng(dataUrl: string, width: number, height: number): Promise<Blob> {
+  const img = await loadElement(dataUrl);
+  const { canvas, ctx } = canvasOf(width, height);
+  const k = Math.max(width / img.naturalWidth, height / img.naturalHeight);
+  const w = img.naturalWidth * k;
+  const h = img.naturalHeight * k;
+  ctx.drawImage(img, (width - w) / 2, (height - h) / 2, w, h);
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Não foi possível gerar o PNG da arte.'))), 'image/png')
+  );
+}
+
 /** Converte um arquivo de logo para PNG (mantém transparência) com no máximo `max` pixels. */
 export async function fileToPng(file: File, max = 700): Promise<string> {
   const img = await loadFile(file);

@@ -28,6 +28,7 @@ model Workspace {
   updatedAt DateTime @updatedAt
 
   brand   Brand?
+  samples BrandSample[]
   entries CalendarEntry[]
   posts   Post[]
 }
@@ -41,6 +42,27 @@ model Brand {
   updatedAt   DateTime @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+/// Amostra reduzida (miniatura JPEG) de um post de exemplo ou de uma página do manual enviados em "Analisar posts".
+/// Serve de referência visual para a IA de imagem criar a arte completa. No máximo 6 por tipo e por empresa.
+model BrandSample {
+  id          String    @id @default(cuid())
+  workspaceId String
+  /// feed, story ou manual
+  tipo        String    @db.VarChar(10)
+  nome        String    @db.VarChar(120)
+  largura     Int
+  altura      Int
+  /// JPEG em base64, sem o prefixo "data:image/jpeg;base64,"
+  image       String    @db.LongText
+  /// Última vez em que foi enviada à IA; as menos usadas entram primeiro (rodízio)
+  usadoEm     DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, tipo])
 }
 
 /// Um post planejado no calendário. Cada data aceita até 2 (slot 1 e 2), por exemplo Natal e aniversário da cidade.

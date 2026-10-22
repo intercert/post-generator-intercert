@@ -33,7 +33,10 @@ export async function PUT(req: Request) {
 export async function DELETE() {
   return handle(async () => {
     const workspaceId = await currentWorkspaceId();
-    await getPrisma().brand.deleteMany({ where: { workspaceId } });
+    const prisma = getPrisma();
+    await prisma.brand.deleteMany({ where: { workspaceId } });
+    // As referências pertencem à identidade que acabou de ser apagada
+    await prisma.brandSample.deleteMany({ where: { workspaceId } });
     return NextResponse.json({ ok: true });
   });
 }

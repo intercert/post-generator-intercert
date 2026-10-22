@@ -1,5 +1,17 @@
 import { NextResponse } from 'next/server';
 import { formatDay, parseISO } from '@/lib/calendar';
+import { currentWorkspaceId } from '@/lib/db';
+import { getPrisma } from '@/lib/prisma';
+import { parseArtMode, type ArtMode } from '@/lib/samples';
+import {
+  GEMINI_IMAGE_MODELS,
+  RefArtError,
+  compareArtText,
+  generateArtWithReferences,
+  pickReferences,
+  readArtText,
+  type References
+} from '@/lib/ref-art';
 import { getFormat, NETWORK_LABELS, ORIENTATION_LABELS, type PostFormat } from '@/lib/formats';
 import {
   LAYOUT_HELP,
@@ -29,6 +41,9 @@ import {
   withRetry,
   type ProviderId
 } from '@/lib/ai-clients';
+
+// Gerar a arte completa com referências é mais lento que a foto de fundo
+export const maxDuration = 180;
 
 const MAX_TOPIC_LENGTH = 500;
 const MAX_OBJETIVO_LENGTH = 300;
@@ -69,8 +84,51 @@ const LAYOUT_IMAGE_HINT: Record<LayoutKind, string> = {
     'clean product mockup (laptop or phone) centered on a light neutral background, screen showing a generic dashboard in the brand colors, soft shadow'
 };
 
+// Enquadramentos da foto, sorteados a cada post para a marca não repetir sempre a mesma cena
+const FRAMINGS = [
+  'close-up detail shot with shallow depth of field',
+  'wide environmental shot that shows the whole place',
+  'over-the-shoulder view of a person using a screen',
+  'top-down flat lay of objects related to the theme',
+  'candid medium shot of two people talking',
+  'low-angle shot of a person looking forward with confidence',
+  'symbolic still life of objects related to the theme',
+  'side profile of a person next to a window with natural light',
+  'hands-only close-up interacting with a device or documents',
+  'lifestyle moment tied to the occasion, not necessarily at work'
+] as const;
+
+/** Resumo dos últimos posts gerados, para a IA não repetir layout, cena e título. */
+interface RecentPost {
+  layout: string;
+  titulo: string;
+  cena: string;
+}
+
+async function loadRecentPosts(): Promise<RecentPost[]> {
+  try {
+    const workspaceId = await currentWorkspaceId();
+    const rows = await getPrisma().post.findMany({
+      where: { workspaceId },
+      orderBy: { updatedAt: 'desc' },
+      take: 6,
+      select: { layout: true, titulo: true, imagePrompt: true }
+    });
+    return rows.map((r) => ({ layout: r.layout, titulo: r.titulo, cena: r.imagePrompt.slice(0, 140) }));
+  } catch {
+    // Sem banco, o post sai igual, só sem a memória dos anteriores
+    return [];
+  }
+}
+
+/** O que muda de um post para o outro: enquadramento sorteado e posts recentes. */
+interface Variety {
+  framing: string;
+  recent: RecentPost[];
+}
+
 // System prompt com o perfil de estilo aprendido da marca + contexto da rede e do formato
-function buildSystemPrompt(format: PostFormat, brand: Brand): string {
+function buildSystemPrompt(format: PostFormat, brand: Brand, variety: Variety): string {
   const safeNote =
     format.safeTop || format.safeBottom
       ? `\n- Área segura: a interface do app cobre os ${format.safeTop}px de cima e os ${format.safeBottom}px de baixo (de ${format.height}px). Mantenha título e subtítulo curtos.`
@@ -88,6 +146,9 @@ function buildSystemPrompt(format: PostFormat, brand: Brand): string {
     )
     .join('\n');
   const optional = (label: string, value: string) => (value ? `\n- ${label}: ${value}` : '');
+  const recentLines = variety.recent
+    .map((p) => `  - layout "${p.layout}", título "${p.titulo}", cena: ${p.cena}`)
+    .join('\n');
   const hashtagNote =
     format.hasCaption && brand.hashtags ? `\n- Hashtags fixas da marca (inclua no fim da legenda): ${brand.hashtags}` : '';
 
@@ -105,10 +166,15 @@ DESTINO DO POST:
 PADRÃO DA MARCA (${brand.nome}):${optional('Sub-marcas', brand.subMarcas)}${optional('O que a empresa faz', brand.segmento)}${brand.conhecimento ? `\n- Produtos e campanhas (fatos oficiais da empresa):\n${brand.conhecimento}` : ''}${brand.paleta ? `\n- Paleta oficial:\n${brand.paleta}` : ''}${brand.manual ? `\n- Manual de identidade visual (regras oficiais; respeite-as):\n${brand.manual}` : ''}
 - Tom de voz: ${brand.tomDeVoz || 'profissional e institucional'}${optional('Assinatura de fechamento usual', brand.cta)}${hashtagNote}
 - Cores: ${brand.corPrimaria} (principal), ${brand.corDestaque} (destaque), ${brand.corFundo} (fundo), ${brand.corTexto} (texto)
-- Estilo das imagens: ${brand.estiloImagem}${optional('Evitar', brand.evitar)}
+- Tratamento visual das imagens (luz, cores, tipo de foto; é ESTILO, não a cena do post): ${brand.estiloImagem}${optional('Evitar', brand.evitar)}
 - Tipografia da marca: ${brand.tipografia}
 - Layouts que a marca usa neste tipo de post (escolha UM):
 ${layoutLines}
+
+VARIEDADE ENTRE POSTS (muito importante):
+- A marca tem um padrão de estilo, não um molde de cena. Cada post deve parecer um post NOVO: assunto da foto, enquadramento, título e palavras diferentes dos anteriores.
+- O ASSUNTO e a CENA da foto vêm do TEMA deste post (ex.: Natal pede clima natalino; Dia do Cliente pede atendimento e relacionamento). O "tratamento visual" acima fala só de luz, cores e tipo de foto: NUNCA copie dele a cena, as pessoas ou a posição dos elementos, porque foram aprendidos de um único exemplo.
+- Enquadramento sugerido para a foto deste post: ${variety.framing}. Adapte se o layout pedir.${variety.recent.length ? `\n- Posts recentes da marca. Não repita a cena, o enquadramento nem a estrutura do título, e evite o mesmo layout em sequência quando houver outro disponível:\n${recentLines}` : ''}
 
 REGRAS GERAIS:
 - Siga o DIRECIONAMENTO do pedido quando houver (por exemplo, "postar para engajamento" pede um post que gere interação, como pergunta ou curiosidade; "mini campanha" pede um post que faça parte de uma série curta).
@@ -130,7 +196,7 @@ Retorne EXCLUSIVAMENTE um objeto JSON válido no seguinte formato:
   "itens": ["item curto", "item curto"],
   "cta": "Fechamento curto ou vazio",
   "legenda": "${format.hasCaption ? 'Legenda completa seguindo o guia de legenda acima' : 'Texto de apoio curto, sem hashtags'}",
-  "image_prompt": "Prompt em inglês para a imagem de fundo, no estilo de imagem da marca, compondo a cena para o layout escolhido. Sem texto na imagem",
+  "image_prompt": "Prompt completo em inglês para a imagem de fundo: a cena do TEMA deste post com o enquadramento sugerido, já aplicando o tratamento visual da marca (luz, cores, tipo de foto) e compondo para o layout escolhido. Sem texto na imagem",
   "image_spec": {
     "subject": "Elemento principal da cena, em inglês",
     "scene": "Ambiente e elementos secundários, em inglês",
@@ -153,20 +219,20 @@ function userMessage(req: PostRequest): string {
 }
 
 // Cada helper devolve o texto bruto do modelo; a validação é única e fica em parsePost.
-async function runOpenAI(req: PostRequest, format: PostFormat, brand: Brand): Promise<string> {
+async function runOpenAI(req: PostRequest, format: PostFormat, brand: Brand, variety: Variety): Promise<string> {
   if (!openai) throw new Error('Chave da OpenAI não configurada.');
   const res = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: buildSystemPrompt(format, brand) },
+      { role: 'system', content: buildSystemPrompt(format, brand, variety) },
       { role: 'user', content: userMessage(req) }
     ]
   });
   return res.choices[0]?.message?.content ?? '';
 }
 
-async function runGemini(req: PostRequest, format: PostFormat, brand: Brand): Promise<string> {
+async function runGemini(req: PostRequest, format: PostFormat, brand: Brand, variety: Variety): Promise<string> {
   if (!gemini) throw new Error('Chave do Gemini não configurada.');
   const client = gemini;
   const response = await tryModels(['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'], (model) =>
@@ -174,7 +240,7 @@ async function runGemini(req: PostRequest, format: PostFormat, brand: Brand): Pr
       model,
       contents: userMessage(req),
       config: {
-        systemInstruction: buildSystemPrompt(format, brand),
+        systemInstruction: buildSystemPrompt(format, brand, variety),
         responseMimeType: 'application/json'
       }
     })
@@ -182,12 +248,12 @@ async function runGemini(req: PostRequest, format: PostFormat, brand: Brand): Pr
   return response.text ?? '';
 }
 
-async function runClaude(req: PostRequest, format: PostFormat, brand: Brand): Promise<string> {
+async function runClaude(req: PostRequest, format: PostFormat, brand: Brand, variety: Variety): Promise<string> {
   if (!anthropic) throw new Error('Chave do Claude não configurada.');
   const res = await anthropic.messages.create({
     model: 'claude-sonnet-5-5',
     max_tokens: 1500,
-    system: buildSystemPrompt(format, brand),
+    system: buildSystemPrompt(format, brand, variety),
     messages: [{ role: 'user', content: userMessage(req) }]
   });
   const block = res.content.find((b) => b.type === 'text');
@@ -195,7 +261,7 @@ async function runClaude(req: PostRequest, format: PostFormat, brand: Brand): Pr
   return block.text;
 }
 
-const RUNNERS: Record<ProviderId, (req: PostRequest, format: PostFormat, brand: Brand) => Promise<string>> = {
+const RUNNERS: Record<ProviderId, (req: PostRequest, format: PostFormat, brand: Brand, variety: Variety) => Promise<string>> = {
   openai: runOpenAI,
   gemini: runGemini,
   claude: runClaude
@@ -287,6 +353,31 @@ function splitTitle(titulo: string): { plain: string; highlights: string[] } {
   return { plain: titulo.replace(/\*\*/g, ''), highlights };
 }
 
+/** Linhas com os textos exatos que entram na arte (rótulo, título, apoio, lista e fechamento). */
+function artTextLines(content: PostContent, brand: Brand): string[] {
+  const { plain, highlights } = splitTitle(content.titulo);
+  const highlightStyle =
+    brand.destaqueEstilo === 'caixa'
+      ? `sobre uma caixa arredondada na cor de destaque (${brand.corDestaque})`
+      : `em negrito na cor de destaque (${brand.corDestaque})`;
+  const texts: string[] = [];
+  if (content.eyebrow) texts.push(`- Rótulo superior (caixa alta, pequeno, com espaçamento entre letras): "${content.eyebrow}"`);
+  texts.push(
+    `- Título: "${plain}"${highlights.length ? `. Destaque ${highlights.map((h) => `"${h}"`).join(' e ')} ${highlightStyle}` : ''}`
+  );
+  if (content.subtitulo) texts.push(`- Texto de apoio (dentro de um card): "${content.subtitulo}"`);
+  if (content.itens.length) texts.push(`- Lista (cada item com um ícone de check): ${content.itens.map((i) => `"${i}"`).join(', ')}`);
+  if (content.cta) texts.push(`- Fechamento: "${content.cta}"`);
+  return texts;
+}
+
+/** Descrição do desenho de fundo da marca. */
+function motifText(brand: Brand): string {
+  return brand.motivo === 'nenhum'
+    ? 'Sem desenho de fundo; fundo limpo.'
+    : `${brand.motivoDetalhe || `Desenho de fundo: ${MOTIF_LABELS[brand.motivo].toLowerCase()}, muito sutil, quase transparente, tom sobre tom, sem competir com o texto.`} Não adicione outros enfeites geométricos pequenos além disso.`;
+}
+
 /**
  * Prompt do POST COMPLETO, para colar em outra IA de imagem (ChatGPT, Gemini, etc.): foto, textos,
  * cards, logo e desenho de fundo, tudo descrito para a imagem sair pronta para publicar.
@@ -299,10 +390,6 @@ function buildPostPrompt(content: PostContent, format: PostFormat, brand: Brand)
   const kind = formatKindOfSize(format.width, format.height);
   const layoutInfo = layoutsFor(brand, kind).find((l) => l.tipo === content.layout);
   const layoutText = layoutInfo?.descricao || LAYOUT_HELP[content.layout];
-  const highlightStyle =
-    brand.destaqueEstilo === 'caixa'
-      ? `sobre uma caixa arredondada na cor de destaque (${brand.corDestaque})`
-      : `em negrito na cor de destaque (${brand.corDestaque})`;
   const logoPosition = logoPositionFor(brand, kind);
   const logoPos = LOGO_POSITION_TEXT[logoPosition];
   const safe =
@@ -310,25 +397,14 @@ function buildPostPrompt(content: PostContent, format: PostFormat, brand: Brand)
       ? `Mantenha textos e logo fora das faixas de ${format.safeTop}px no topo e ${format.safeBottom}px no rodapé (a interface do app cobre essas áreas). `
       : '';
 
-  const texts: string[] = [];
-  if (content.eyebrow) texts.push(`- Rótulo superior (caixa alta, pequeno, com espaçamento entre letras): "${content.eyebrow}"`);
-  texts.push(
-    `- Título: "${plain}"${highlights.length ? `. Destaque ${highlights.map((h) => `"${h}"`).join(' e ')} ${highlightStyle}` : ''}`
-  );
-  if (content.subtitulo) texts.push(`- Texto de apoio (dentro de um card): "${content.subtitulo}"`);
-  if (content.itens.length) texts.push(`- Lista (cada item com um ícone de check): ${content.itens.map((i) => `"${i}"`).join(', ')}`);
-  if (content.cta) texts.push(`- Fechamento: "${content.cta}"`);
-
-  const motif =
-    brand.motivo === 'nenhum'
-      ? 'Sem desenho de fundo; fundo limpo.'
-      : `${brand.motivoDetalhe || `Desenho de fundo: ${MOTIF_LABELS[brand.motivo].toLowerCase()}, muito sutil, quase transparente, tom sobre tom, sem competir com o texto.`} Não adicione outros enfeites geométricos pequenos além disso.`;
+  const texts = artTextLines(content, brand);
+  const motif = motifText(brand);
 
   const prompt = [
     `Crie a ARTE FINAL de um post de ${NETWORK_LABELS[format.network]} (${format.label}, ${format.width}×${format.height}px, proporção ${aspect}) para a marca ${brand.nome}, pronta para publicar: a foto, TODOS os textos, os cards e a logo já aplicados na própria imagem. Se houver imagens de referência anexadas, siga fielmente o estilo delas (composição, cores, fontes, cards, logo e desenho de fundo).`,
     '',
     '1) FOTO / CENA',
-    `${content.image_prompt.replace(/[.\s]+$/, '')}. ${LAYOUT_IMAGE_HINT[content.layout]}. Estilo da foto: ${brand.estiloImagem}`,
+    `${content.image_prompt.replace(/[.\s]+$/, '')}. ${LAYOUT_IMAGE_HINT[content.layout]}.`,
     '',
     `2) LAYOUT (${LAYOUT_LABELS[content.layout]})`,
     layoutText,
@@ -426,7 +502,6 @@ function buildImagePrompt(content: PostContent, format: PostFormat, brand: Brand
     content.image_prompt,
     LAYOUT_IMAGE_HINT[content.layout],
     `${ORIENTATION_EN[format.orientation]} ${format.imagenRatio} aspect ratio`,
-    brand.estiloImagem,
     `color palette: ${brand.corPrimaria} primary, ${brand.corDestaque} accent, ${brand.corFundo} light background`,
     'no text, no watermark'
   ]
@@ -450,6 +525,110 @@ function buildImagePrompt(content: PostContent, format: PostFormat, brand: Brand
   };
 
   return { prompt, json };
+}
+
+/**
+ * Prompt da arte COMPLETA feita pela IA com posts de exemplo anexados: o estilo vem das referências,
+ * a composição vem do tema. Os textos entram exatos e a logo é a oficial, enviada como imagem.
+ */
+function buildReferencePrompt(content: PostContent, format: PostFormat, brand: Brand, refs: References, variety: Variety): string {
+  const divisor = gcd(format.width, format.height);
+  const aspect = `${format.width / divisor}:${format.height / divisor}`;
+  const kind = formatKindOfSize(format.width, format.height);
+  const logoPos = LOGO_POSITION_TEXT[logoPositionFor(brand, kind)];
+  const safe =
+    format.safeTop || format.safeBottom
+      ? `Mantenha textos e logo fora das faixas de ${format.safeTop}px no topo e ${format.safeBottom}px no rodapé (a interface do app cobre essas áreas).`
+      : '';
+  const recent = variety.recent.map((p) => `"${p.titulo}" (${p.cena})`).join('; ');
+  const logoCount = refs.logos.length;
+
+  return [
+    `Crie a ARTE FINAL COMPLETA de um post de ${NETWORK_LABELS[format.network]} (${format.label}, ${format.width}×${format.height}px, proporção ${aspect}) para a marca ${brand.nome}, pronta para publicar: a foto, TODOS os textos, os cards, os ícones e a logo já aplicados na própria imagem.`,
+    '',
+    'COMO USAR AS REFERÊNCIAS',
+    `- As ${refs.refs.length} imagens "Referência" são posts REAIS já publicados pela marca${refs.otherKind ? ` (de outro formato, ${kind === 'story' ? 'feed' : 'story'}; adapte ao formato pedido)` : ''}. Aprenda com elas a linguagem visual: tipografia e pesos, cores, forma e cantos dos cards, estilo do destaque no título, ícones, desenho de fundo, tratamento da foto, e tamanho e posição da logo.`,
+    '- NÃO copie nenhuma referência: não repita a cena, as pessoas, a foto, o texto nem o arranjo exato dos elementos. Crie uma composição NOVA, pensada para o tema deste post, variando a posição da foto, do título e dos cards em relação às referências, mas mantendo a mesma identidade visual.',
+    logoCount
+      ? `- ${logoCount === 1 ? 'A última imagem é a LOGO OFICIAL' : `As últimas ${logoCount} imagens são a LOGO OFICIAL`} da marca: aplique-a na arte sem redesenhar, sem trocar cores ou proporções e sem inventar outra.`
+      : '- Nenhuma logo foi anexada: reproduza a logo como as referências mostram.',
+    '',
+    '1) FOTO / CENA (o assunto vem do tema deste post)',
+    `${content.image_prompt.replace(/[.\s]+$/, '')}.`,
+    variety.recent.length ? `Posts recentes da marca (não repita a cena nem a estrutura): ${recent}.` : '',
+    '',
+    '2) TEXTOS NA ARTE (escreva exatamente como abaixo, em português do Brasil, com a acentuação correta; não traduza, não invente e não acrescente nenhuma outra palavra)',
+    ...artTextLines(content, brand),
+    '',
+    '3) LOGO',
+    `Posição: ${logoPos}, em tamanho pequeno (cerca de 20 a 25% da largura da arte). ${brand.logoDescricao}`.trim(),
+    safe,
+    '',
+    '4) DESENHO DE FUNDO',
+    motifText(brand),
+    '',
+    '5) CORES E TIPOGRAFIA',
+    `Cores: principal ${brand.corPrimaria}, destaque ${brand.corDestaque}, fundo claro ${brand.corFundo}, texto ${brand.corTexto}. Tipografia: ${brand.tipografia}`,
+    brand.paleta ? `Paleta oficial (use somente estas cores):\n${brand.paleta}` : '',
+    brand.elementos ? `Elementos que se repetem na marca: ${brand.elementos}` : '',
+    brand.manual ? `Regras oficiais do manual de identidade (obrigatórias):\n${clip(brand.manual, 1500)}` : '',
+    '',
+    'NÃO FAÇA',
+    `Não escreva texto além do informado; sem erros de ortografia; sem logo diferente da oficial; sem marca d'água. ${brand.evitar}`.trim()
+  ]
+    .filter((line, i, all) => line !== '' || (all[i - 1] !== '' && i > 0))
+    .join('\n');
+}
+
+interface FullArt {
+  /** Arte pronta (data URL). */
+  url: string;
+  provider: string;
+  prompt: string;
+  refCount: number;
+  refNames: string[];
+  /** Preenchido quando a arte saiu, mas o texto não pôde ser conferido. */
+  warning?: string;
+}
+
+/**
+ * Gera a arte completa com referências e confere o texto escrito nela. Lança RefArtError (ou o erro do Gemini)
+ * quando não dá certo, para o chamador cair para o modo por template.
+ */
+async function generateFullArt(content: PostContent, format: PostFormat, brand: Brand, variety: Variety): Promise<FullArt> {
+  const kind = formatKindOfSize(format.width, format.height);
+  const refs = await pickReferences(kind);
+  if (!refs) throw new RefArtError('Não há posts de exemplo guardados. Use "Analisar novos posts" na Identidade visual para guardá-los.');
+
+  const prompt = buildReferencePrompt(content, format, brand, refs, variety);
+  const names = refs.refs.map((r) => r.label);
+  console.log(`Arte com referências: enviando ${refs.refs.length} referência(s) e ${refs.logos.length} logo(s) ao Gemini.`);
+  console.log('Prompt da arte com referências:', prompt);
+
+  const art = await generateArtWithReferences({ prompt, refs, aspectRatio: format.imagenRatio });
+
+  const { plain } = splitTitle(content.titulo);
+  const expected = { titulo: [plain], outros: [content.eyebrow, content.subtitulo, ...content.itens, content.cta].filter(Boolean) };
+  const allowed = [brand.nome, brand.subMarcas, brand.site, brand.instagram, brand.cta];
+
+  let warning: string | undefined;
+  try {
+    const check = compareArtText(await readArtText(art.dataUrl), expected, allowed);
+    if (!check.ok) throw new RefArtError(`o texto da arte saiu errado, ${check.problem}`);
+  } catch (err) {
+    if (err instanceof RefArtError) throw err;
+    console.warn('Não foi possível conferir o texto da arte:', err);
+    warning = 'Não consegui conferir automaticamente o texto escrito na arte. Leia com atenção antes de publicar.';
+  }
+
+  return {
+    url: art.dataUrl,
+    provider: `Gemini (arte completa, ${refs.refs.length} ${refs.refs.length === 1 ? 'referência' : 'referências'})`,
+    prompt,
+    refCount: refs.refs.length,
+    refNames: names,
+    warning
+  };
 }
 
 // Geração de imagem com fallback; tamanho e proporção seguem o formato
@@ -478,7 +657,7 @@ async function generateImage(content: PostContent, format: PostFormat, brand: Br
   if (gemini) {
     const client = gemini;
     try {
-      const res = await tryModels(['gemini-nano-banana-2.1', 'gemini-3.1-flash-image'], (model) =>
+      const res = await tryModels(GEMINI_IMAGE_MODELS, (model) =>
         client.models.generateContent({
           model,
           contents: prompt,
@@ -523,19 +702,24 @@ export async function POST(req: Request) {
     };
 
     const provider = parseProvider(body.provider, 'openai');
+    const artMode = parseArtMode(body.modoArte);
 
     const format = getFormat(body.formato);
     if (!format) throw new HttpError('Formato inválido. Escolha uma rede e um formato da lista.', 400);
 
     const brand = normalizeBrand(body.brand);
     const order = providerOrder(provider);
+    const variety: Variety = {
+      framing: FRAMINGS[Math.floor(Math.random() * FRAMINGS.length)],
+      recent: await loadRecentPosts()
+    };
 
     let content: PostContent | null = null;
     let usedProvider = '';
 
     for (const p of order) {
       try {
-        const raw = await withRetry(() => RUNNERS[p](request, format, brand));
+        const raw = await withRetry(() => RUNNERS[p](request, format, brand, variety));
         console.log(`Resposta bruta de ${p}:`, raw);
         content = parsePost(raw, format, brand);
         usedProvider = PROVIDER_LABELS[p];
@@ -549,7 +733,23 @@ export async function POST(req: Request) {
       throw new HttpError('Os modelos de IA não conseguiram gerar o texto. Tente novamente em instantes.', 502);
     }
 
-    const image = await generateImage(content, format, brand);
+    // Arte completa pela IA com referências; se falhar, cai para a foto de fundo + template
+    let fullArt: FullArt | null = null;
+    let modeNotice = '';
+    if (artMode === 'referencias') {
+      try {
+        fullArt = await generateFullArt(content, format, brand, variety);
+        modeNotice = fullArt.warning ?? '';
+      } catch (err) {
+        console.warn('Falha na arte com referências, usando o modo por template:', err);
+        const reason = err instanceof RefArtError ? err.message : describeImageFailure(err);
+        modeNotice = `A arte com referências não deu certo: ${reason.replace(/\.$/, '')}. Usei o modo por template no lugar.`;
+      }
+    }
+
+    const image = fullArt
+      ? { ...buildImagePrompt(content, format, brand), url: '', provider: fullArt.provider, warning: undefined as string | undefined }
+      : await generateImage(content, format, brand);
     const post = buildPostPrompt(content, format, brand);
     console.log('Prompt da imagem:', image.prompt);
 
@@ -562,11 +762,15 @@ export async function POST(req: Request) {
       cta: content.cta,
       legenda: content.legenda,
       usedProvider,
+      modo: (fullArt ? 'referencias' : 'template') satisfies ArtMode,
+      modoAviso: modeNotice,
+      artImageUrl: fullArt?.url ?? '',
+      refsUsadas: fullArt?.refCount ?? 0,
       bgImageUrl: image.url,
       imageProvider: image.provider,
       imageWarning: image.warning ?? '',
       imagePrompt: image.prompt,
-      imageJson: image.json,
+      imageJson: fullArt ? { ...image.json, modo: 'referencias', referencias: fullArt.refNames } : image.json,
       postPrompt: post.prompt,
       postJson: post.json,
       brand: withoutLogos(brand),

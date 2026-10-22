@@ -15,6 +15,9 @@ import {
 import { LAYOUT_LABELS, formatKindOfSize, withoutLogos, type LayoutKind } from '@/lib/brand';
 import { useBrand, useBrandConfigured, useBrandStatus } from '@/lib/use-brand';
 import { useProviders } from '@/lib/use-providers';
+import { useSampleCounts } from '@/lib/use-samples';
+import { coverToPng } from '@/lib/image-tools';
+import type { ArtMode } from '@/lib/samples';
 import { MONTH_NAMES, STATUS_LABELS, entryKey, entryTopic, formatDay, needsWork, parseISO, parseSlot, toISO } from '@/lib/calendar';
 import { setEntryStatus, useCalendar } from '@/lib/use-calendar';
 import { savePost, updatePostCaption, usePostDetail, useSavedPosts } from '@/lib/post-store';
@@ -34,12 +37,29 @@ interface GeneratedPost {
   layout: LayoutKind;
   imageProvider: string;
   imageWarning: string;
+  /** Aviso sobre o modo da arte (caiu para o template, ou texto não conferido). Vazio se está tudo certo. */
+  modoAviso: string;
+  /** Modo que de fato fez a arte. */
+  modo: ArtMode;
   imagePrompt: string;
   imageJson: string;
   postPrompt: string;
   postJson: string;
   brandJson: string;
 }
+
+const ART_MODE_OPTIONS: { id: ArtMode; label: string; hint: string }[] = [
+  {
+    id: 'referencias',
+    label: 'IA com referências',
+    hint: 'A IA de imagem cria a arte inteira (foto, textos, cards e logo) inspirada nos seus posts de exemplo, com composição própria do tema.'
+  },
+  {
+    id: 'template',
+    label: 'Por template',
+    hint: 'A IA cria só a foto de fundo e a arte é montada por código, em um dos layouts fixos da marca.'
+  }
+];
 
 const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'openai', label: 'OpenAI' },
@@ -191,6 +211,8 @@ export default function GeneratorPage() {
           layout: savedForDay.layout,
           imageProvider: savedForDay.imageProvider,
           imageWarning: savedForDay.imageWarning,
+          modoAviso: '',
+          modo: 'template',
           imagePrompt: savedDetail?.imagePrompt ?? '',
           imageJson: savedDetail?.imageJson ?? '',
           postPrompt: savedDetail?.postPrompt ?? '',
@@ -199,6 +221,11 @@ export default function GeneratorPage() {
         }
       : null;
   const [provider, setProvider] = useState<Provider>('openai');
+  // Com posts de exemplo guardados, a arte com referências é o padrão; sem eles só o template funciona
+  const sampleCounts = useSampleCounts();
+  const hasSamples = sampleCounts.feed + sampleCounts.story > 0;
+  const [artModeChoice, setArtModeChoice] = useState<ArtMode | null>(null);
+  const artMode: ArtMode = hasSamples ? (artModeChoice ?? 'referencias') : 'template';
   const [networkId, setNetworkId] = useState<NetworkId>(DEFAULT_NETWORK);
   const [formatId, setFormatId] = useState(DEFAULT_FORMAT_ID);
   const [step, setStep] = useState<Step>('idle');
@@ -231,7 +258,12 @@ export default function GeneratorPage() {
   const network = getNetwork(networkId);
   const selected = getFormat(formatId) ?? network.formats[0];
   const loading = step !== 'idle';
-  const stepMessage = step === 'idle' ? '' : STEP_MESSAGES[step];
+  const stepMessage =
+    step === 'idle'
+      ? ''
+      : step === 'texto' && artMode === 'referencias'
+        ? 'Escrevendo o texto e criando a arte com a IA (pode levar cerca de um minuto)…'
+        : STEP_MESSAGES[step];
   const shown = generating ?? current?.format ?? selected;
   const hasSafeArea = shown.safeTop > 0 || shown.safeBottom > 0;
   const showEmpty = !loading && !current;
@@ -283,6 +315,7 @@ export default function GeneratorPage() {
           dataPost: entry?.date,
           provider: activeProvider,
           formato: format.id,
+          modoArte: artMode,
           brand: withoutLogos(brand)
         }),
         signal
@@ -291,25 +324,30 @@ export default function GeneratorPage() {
       const data = await res.json();
 
       setStep('arte');
-      const og = await fetch('/api/og', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          layout: data.layout,
-          eyebrow: data.eyebrow,
-          titulo: data.titulo,
-          subtitulo: data.subtitulo,
-          itens: data.itens,
-          cta: data.cta,
-          bgUrl: data.bgImageUrl,
-          formato: format.id,
-          brand
-        }),
-        signal
-      });
-      if (!og.ok) throw new Error(await errorFrom(og, 'Não foi possível montar a arte do post.'));
-
-      const blob = await og.blob();
+      let blob: Blob;
+      if (data.modo === 'referencias' && data.artImageUrl) {
+        // A IA já entregou a arte pronta; só ajustamos ao tamanho exato do formato
+        blob = await coverToPng(data.artImageUrl, format.width, format.height);
+      } else {
+        const og = await fetch('/api/og', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            layout: data.layout,
+            eyebrow: data.eyebrow,
+            titulo: data.titulo,
+            subtitulo: data.subtitulo,
+            itens: data.itens,
+            cta: data.cta,
+            bgUrl: data.bgImageUrl,
+            formato: format.id,
+            brand
+          }),
+          signal
+        });
+        if (!og.ok) throw new Error(await errorFrom(og, 'Não foi possível montar a arte do post.'));
+        blob = await og.blob();
+      }
       const imageUrl = URL.createObjectURL(blob);
       if (urlRef.current) URL.revokeObjectURL(urlRef.current);
       urlRef.current = imageUrl;
@@ -323,6 +361,8 @@ export default function GeneratorPage() {
         layout: data.layout,
         imageProvider: data.imageProvider,
         imageWarning: data.imageWarning ?? '',
+        modoAviso: data.modoAviso ?? '',
+        modo: data.modo === 'referencias' ? 'referencias' : 'template',
         imagePrompt: data.imagePrompt,
         imageJson: JSON.stringify(data.imageJson, null, 2),
         postPrompt: data.postPrompt,
@@ -599,6 +639,36 @@ export default function GeneratorPage() {
             </fieldset>
           </div>
 
+          <div className="block">
+            <fieldset className="fs">
+              <legend className="sub-q">Como criar a arte?</legend>
+              <div className="row">
+                {ART_MODE_OPTIONS.map((m) => {
+                  const disabled = m.id === 'referencias' && !hasSamples;
+                  return (
+                    <label key={m.id} className="pick">
+                      <input
+                        type="radio"
+                        name="modo-arte"
+                        value={m.id}
+                        checked={artMode === m.id}
+                        disabled={disabled}
+                        onChange={() => setArtModeChoice(m.id)}
+                      />
+                      <span className="face face-pill">{disabled ? `${m.label} (sem referências)` : m.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="hint">{ART_MODE_OPTIONS.find((m) => m.id === artMode)?.hint}</p>
+              {!hasSamples && (
+                <p className="hint">
+                  Para usar referências, guarde posts de exemplo em <Link href="/marca">Identidade</Link> com “Analisar novos posts”.
+                </p>
+              )}
+            </fieldset>
+          </div>
+
           <details className="adjust">
             <summary>Ajustes</summary>
             <fieldset className="fs">
@@ -722,8 +792,17 @@ export default function GeneratorPage() {
           {current && !loading && (
             <>
               <span className="confirm">
-                {result ? 'Pronto' : 'Post salvo deste dia'}, gerado com {current.usedProvider} · layout {LAYOUT_LABELS[current.layout]}
+                {result ? 'Pronto' : 'Post salvo deste dia'}, gerado com {current.usedProvider} ·{' '}
+                {current.imageProvider.includes('arte completa')
+                  ? 'arte criada pela IA com referências'
+                  : `layout ${LAYOUT_LABELS[current.layout]}`}
               </span>
+              {current.modoAviso && (
+                <p role="alert" className="callout">
+                  <strong>{current.modo === 'template' ? 'A arte saiu pelo template.' : 'Confira a arte.'}</strong>{' '}
+                  {current.modoAviso}
+                </p>
+              )}
               {current.imageWarning && (
                 <p role="alert" className="callout">
                   <strong>A foto de fundo é um placeholder.</strong> {current.imageWarning} O prompt e o JSON abaixo
