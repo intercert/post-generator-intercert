@@ -56,10 +56,10 @@ Regras:
 - Use as cores medidas nos pixels (fornecidas pelo usuário) como base para os códigos hexadecimais; escolha, entre elas, o papel de cada uma.
 - A logo será recortada da imagem que você indicar: prefira uma imagem em que a logo apareça inteira, grande e sobre fundo claro. Informe a caixa que a envolve em frações da imagem (0 a 1, a partir do canto superior esquerdo).
 - FEED E STORY: cada imagem diz se é um post de feed (quadrado ou 4:5) ou um story (vertical 9:16, com o topo e o rodapé cobertos pela interface do app). Eles têm composições diferentes, então descreva cada padrão separadamente: "layouts" só com o que aparece nos posts de FEED e "layouts_story" só com o que aparece nos STORIES. Se não há nenhum story, devolva "layouts_story": []. Se só há stories, repita os mesmos layouts nos dois. Em "logo", "posicao_padrao" é a posição nos posts de feed e "posicao_story" a posição nos stories (igual à do feed se não houver stories).
-- Em "layouts", liste só os tipos que realmente aparecem. Tipos possíveis:
+- Em "layouts", liste TODOS os tipos que aparecem, mesmo que em poucas imagens; não escolha um só como "o padrão" se houver mais de um. Liste só os que realmente aparecem. Tipos possíveis:
 ${LAYOUT_KINDS.map((k) => `  - "${k}": ${LAYOUT_HELP[k]}`).join('\n')}
   Em "quando", diga em que tipo de post a marca usa aquele layout.
-- "estilo_imagem" deve ser um trecho em inglês, pronto para um gerador de imagens, que descreva o estilo das fotos e ilustrações (tipo de foto, pessoas, ambiente, luz, mockups). Não descreva texto nem logo.
+- "estilo_imagem" deve ser um trecho em inglês, pronto para um gerador de imagens, com o TRATAMENTO visual que se repete em TODAS as imagens: tipo de fotografia, nível de realismo, luz, paleta e clima, e o tipo geral de pessoas e ambientes quando for comum a vários posts. NÃO descreva a cena de uma imagem específica (quem aparece, o que faz, em que lado fica) nem a composição de um post só: os temas mudam a cada post, então a cena tem de poder mudar. Não descreva texto nem logo.
 - "observacoes": até 4 pontos que a pessoa deve conferir (ex.: logo cortada, nome ambíguo, cores parecidas).
 
 MANUAL DE IDENTIDADE VISUAL: algumas imagens podem ser páginas de um manual (a legenda da imagem avisa). Quando houver manual:

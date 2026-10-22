@@ -467,7 +467,7 @@ export default function BrandModal({ initial, notes = [], source, onSave, onCanc
             <div className="fields">
               {text('estiloImagem', 'Estilo das imagens', {
                 multiline: true,
-                hint: 'Em inglês, vai direto para o gerador de imagens.'
+                hint: 'Em inglês. Descreva o estilo (tipo de foto, luz, clima), não uma cena específica: o assunto de cada foto vem do tema do post.'
               })}
               {text('tomDeVoz', 'Tom de voz', { multiline: true })}
               {text('evitar', 'O que evitar', { multiline: true })}
