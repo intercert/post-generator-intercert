@@ -118,6 +118,7 @@ export async function sendLocalData(data: LocalData): Promise<string | null> {
     const layout: LayoutKind = (LAYOUT_KINDS as readonly string[]).includes(post.layout) ? (post.layout as LayoutKind) : 'cartao';
     const error = await savePost({
       date: post.date,
+      slot: 1,
       titulo: post.titulo ?? '',
       layout,
       formatId: post.formatId,

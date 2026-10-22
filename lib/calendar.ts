@@ -1,18 +1,39 @@
 // Calendário de posts: cada dia guarda o que a equipe planejou (datas comemorativas + instrução do post).
 // Quando o dia chega, o gerador abre já com tudo preenchido.
 
-export const ENTRY_STATUSES = ['pendente', 'gerado', 'postado'] as const;
+// agendado = a arte está programada na ferramenta de publicação (ex.: Meta Business Suite), mas ainda não foi ao ar
+export const ENTRY_STATUSES = ['pendente', 'gerado', 'agendado', 'postado'] as const;
 export type EntryStatus = (typeof ENTRY_STATUSES)[number];
 
 export const STATUS_LABELS: Record<EntryStatus, string> = {
   pendente: 'A fazer',
   gerado: 'Gerado',
+  agendado: 'Agendado',
   postado: 'Postado'
 };
+
+/** Ainda falta alguma coisa para o post sair: criar a arte ou agendá-la. */
+export const needsWork = (status: EntryStatus) => status === 'pendente' || status === 'gerado';
+
+/** Quantos posts cada dia do calendário aceita (ex.: Natal e aniversário da cidade). */
+export const MAX_POSTS_PER_DAY = 2;
+export const SLOTS = [1, 2] as const;
+export type Slot = (typeof SLOTS)[number];
+
+/** Posição válida (1 ou 2); qualquer outra coisa vira null. */
+export function parseSlot(value: unknown): Slot | null {
+  const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return (SLOTS as readonly unknown[]).includes(n) ? (n as Slot) : null;
+}
+
+/** Chave de um post: a data mais a posição dentro do dia. */
+export const entryKey = (date: string, slot: Slot) => `${date}:${slot}`;
 
 export interface CalendarEntry {
   /** YYYY-MM-DD, no fuso local. */
   date: string;
+  /** Posição no dia: 1 ou 2. */
+  slot: Slot;
   /** Datas comemorativas do dia (ex.: "Dia do professor"). */
   ocasioes: string[];
   /** O que a equipe quer do post (ex.: "postar para engajamento"). */
@@ -105,6 +126,7 @@ export function normalizeEntry(input: unknown): CalendarEntry | null {
 
   return {
     date: r.date,
+    slot: parseSlot(r.slot) ?? 1,
     ocasioes,
     objetivo: typeof r.objetivo === 'string' ? cleanLine(r.objetivo).slice(0, ENTRY_LIMITS.objetivo) : '',
     detalhes: typeof r.detalhes === 'string' ? r.detalhes.trim().slice(0, ENTRY_LIMITS.detalhes) : '',
@@ -112,15 +134,24 @@ export function normalizeEntry(input: unknown): CalendarEntry | null {
   };
 }
 
-/** Uma entrada por data (a última vence), em ordem cronológica. */
+/** Ordem do calendário: por data e, no mesmo dia, pela posição. */
+export const byDateAndSlot = (a: Pick<CalendarEntry, 'date' | 'slot'>, b: Pick<CalendarEntry, 'date' | 'slot'>) =>
+  a.date.localeCompare(b.date) || a.slot - b.slot;
+
+/** Uma entrada por data e posição (a última vence), em ordem cronológica. */
 export function normalizeEntries(input: unknown): CalendarEntry[] {
   if (!Array.isArray(input)) return [];
-  const byDate = new Map<string, CalendarEntry>();
+  const byKey = new Map<string, CalendarEntry>();
   for (const item of input) {
     const entry = normalizeEntry(item);
-    if (entry) byDate.set(entry.date, entry);
+    if (entry) byKey.set(entryKey(entry.date, entry.slot), entry);
   }
-  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  return [...byKey.values()].sort(byDateAndSlot);
+}
+
+/** Primeira posição livre do dia (1 ou 2), ou null se o dia já tem o máximo. */
+export function freeSlot(taken: readonly Slot[]): Slot | null {
+  return SLOTS.find((s) => !taken.includes(s)) ?? null;
 }
 
 // ---------- Leitura do texto colado ----------
@@ -162,9 +193,10 @@ export interface ParsedCalendar {
  *   Aniversário de Goiânia
  *
  * Linhas em branco separam os dias, mas uma nova linha de data também abre um novo dia.
+ * Se a mesma data aparecer duas vezes, a segunda vira o 2º post do dia.
  */
 export function parseCalendarText(text: string, year: number): ParsedCalendar {
-  const entries = new Map<string, CalendarEntry>();
+  const entries: CalendarEntry[] = [];
   const problems: string[] = [];
   let current: CalendarEntry | null = null;
 
@@ -201,17 +233,24 @@ export function parseCalendarText(text: string, year: number): ParsedCalendar {
         current = null;
         continue;
       }
-      if (entries.has(date)) problems.push(`${formatDay(date)} aparece mais de uma vez; vale a última.`);
+      // A mesma data duas vezes vira o 2º post do dia; a partir da terceira não há mais vaga
+      const slot = freeSlot(entries.filter((e) => e.date === date).map((e) => e.slot));
+      if (!slot) {
+        problems.push(`${formatDay(date)} aparece mais de ${MAX_POSTS_PER_DAY} vezes; só os ${MAX_POSTS_PER_DAY} primeiros entram.`);
+        current = null;
+        continue;
+      }
       // "16 de outubro. Dia X": o que vem na linha da data é a data comemorativa, não o objetivo
       const asOccasion = readsAsOccasion(separator, rest);
       current = {
         date,
+        slot,
         ocasioes: asOccasion ? [capitalize(cleanLine(rest)).slice(0, ENTRY_LIMITS.ocasiao)] : [],
         objetivo: asOccasion ? '' : capitalize(cleanLine(rest)).slice(0, ENTRY_LIMITS.objetivo),
         detalhes: '',
         status: 'pendente'
       };
-      entries.set(date, current);
+      entries.push(current);
       continue;
     }
 
@@ -225,7 +264,7 @@ export function parseCalendarText(text: string, year: number): ParsedCalendar {
     }
   }
 
-  return { entries: [...entries.values()].sort((a, b) => a.date.localeCompare(b.date)), problems };
+  return { entries: entries.sort(byDateAndSlot), problems };
 }
 
 // ---------- Grade do mês ----------

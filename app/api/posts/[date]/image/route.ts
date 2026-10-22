@@ -1,6 +1,6 @@
 import { connection } from 'next/server';
 import { isValidDate } from '@/lib/calendar';
-import { ApiError, currentWorkspaceId, handle } from '@/lib/db';
+import { ApiError, currentWorkspaceId, handle, slotOf } from '@/lib/db';
 import { getPrisma } from '@/lib/prisma';
 
 type Context = { params: Promise<{ date: string }> };
@@ -11,10 +11,11 @@ export async function GET(req: Request, context: Context) {
   return handle(async () => {
     const { date } = await context.params;
     if (!isValidDate(date)) throw new ApiError('Data inválida.', 400);
+    const slot = slotOf(req);
 
     const workspaceId = await currentWorkspaceId();
     const row = await getPrisma().post.findUnique({
-      where: { workspaceId_date: { workspaceId, date } },
+      where: { workspaceId_date_slot: { workspaceId, date, slot } },
       select: { image: true, imageType: true, updatedAt: true }
     });
     if (!row) throw new ApiError('Este dia ainda não tem post salvo.', 404);

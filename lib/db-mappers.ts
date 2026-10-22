@@ -20,6 +20,7 @@ export function brandToRow(input: unknown) {
 
 export function entryFromRow(row: {
   date: string;
+  slot: number;
   ocasioes: string;
   objetivo: string;
   detalhes: string;
@@ -31,12 +32,13 @@ export function entryFromRow(row: {
   } catch {
     // lista corrompida: fica vazia
   }
-  return normalizeEntry({ date: row.date, ocasioes, objetivo: row.objetivo, detalhes: row.detalhes, status: row.status });
+  return normalizeEntry({ date: row.date, slot: row.slot, ocasioes, objetivo: row.objetivo, detalhes: row.detalhes, status: row.status });
 }
 
 export function entryToData(entry: CalendarEntry) {
   return {
     date: entry.date,
+    slot: entry.slot,
     ocasioes: JSON.stringify(entry.ocasioes),
     objetivo: entry.objetivo,
     detalhes: entry.detalhes,

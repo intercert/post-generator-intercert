@@ -6,7 +6,7 @@ import { getPrisma } from '@/lib/prisma';
 
 const MAX_ENTRIES = 500;
 
-/** Importa vários dias de uma vez; os que já existem na mesma data são substituídos. */
+/** Importa vários posts de uma vez; os que já existem na mesma data e posição são substituídos. */
 export async function POST(req: Request) {
   return handle(async () => {
     const body = await jsonBody(req);
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
       entries.map((entry) => {
         const data = entryToData(entry);
         return getPrisma().calendarEntry.upsert({
-          where: { workspaceId_date: { workspaceId, date: entry.date } },
+          where: { workspaceId_date_slot: { workspaceId, date: entry.date, slot: entry.slot } },
           create: { workspaceId, ...data },
           update: data
         });

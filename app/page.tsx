@@ -15,10 +15,11 @@ import {
 import { LAYOUT_LABELS, formatKindOfSize, withoutLogos, type LayoutKind } from '@/lib/brand';
 import { useBrand, useBrandConfigured, useBrandStatus } from '@/lib/use-brand';
 import { useProviders } from '@/lib/use-providers';
-import { entryTopic, formatDay } from '@/lib/calendar';
+import { MONTH_NAMES, STATUS_LABELS, entryKey, entryTopic, formatDay, needsWork, parseISO, parseSlot, toISO } from '@/lib/calendar';
 import { setEntryStatus, useCalendar } from '@/lib/use-calendar';
 import { savePost, updatePostCaption, usePostDetail, useSavedPosts } from '@/lib/post-store';
 import { useQueryParam } from '@/lib/use-query-param';
+import { useToday } from '@/lib/use-today';
 
 type Provider = 'openai' | 'gemini' | 'claude';
 type Step = 'idle' | 'texto' | 'arte';
@@ -154,9 +155,21 @@ export default function GeneratorPage() {
   const { status: brandStatus } = useBrandStatus();
   const available = useProviders();
   // Dia do calendário que abriu esta tela (?data=AAAA-MM-DD); tema e objetivo vêm dele até a pessoa editar
+  // e a posição dele no dia (?pos=1 ou 2): cada data aceita até 2 posts
   const dataParam = useQueryParam('data');
+  const slot = parseSlot(useQueryParam('pos')) ?? 1;
   const calendar = useCalendar();
-  const entry = dataParam ? calendar.find((e) => e.date === dataParam) : undefined;
+  const entry = dataParam ? calendar.find((e) => e.date === dataParam && e.slot === slot) : undefined;
+  const today = useToday();
+  // Posts que ainda pedem ação: os dos últimos 7 dias que ficaram para trás e os próximos
+  const pending = (() => {
+    const t = parseISO(today);
+    if (!t) return [];
+    const weekAgo = new Date(t.year, t.month, t.day - 7);
+    const since = toISO(weekAgo.getFullYear(), weekAgo.getMonth(), weekAgo.getDate());
+    return calendar.filter((e) => needsWork(e.status) && e.date >= since).slice(0, 3);
+  })();
+  const otherEntry = entry ? calendar.find((e) => e.date === entry.date && e.slot !== entry.slot) : undefined;
   const [topicDraft, setTopic] = useState<string | null>(null);
   const [objetivoDraft, setObjetivo] = useState<string | null>(null);
   const topic = topicDraft ?? (entry ? entryTopic(entry) || entry.objetivo : '');
@@ -164,8 +177,8 @@ export default function GeneratorPage() {
 
   // Post já gerado para este dia: reaparece ao voltar à tela
   const savedPosts = useSavedPosts();
-  const savedForDay = entry ? savedPosts[entry.date] : undefined;
-  const savedDetail = usePostDetail(entry?.date, savedForDay?.savedAt);
+  const savedForDay = entry ? savedPosts[entryKey(entry.date, entry.slot)] : undefined;
+  const savedDetail = usePostDetail(entry?.date, entry?.slot, savedForDay?.savedAt);
   const savedFormat = savedForDay ? getFormat(savedForDay.formatId) : undefined;
   const restored: GeneratedPost | null =
     savedForDay && savedFormat
@@ -173,7 +186,7 @@ export default function GeneratorPage() {
           titulo: savedForDay.titulo,
           usedProvider: savedForDay.usedProvider,
           imageUrl: savedForDay.imageUrl,
-          fileName: `post-${savedForDay.formatId}-${savedForDay.date}.png`,
+          fileName: `post-${savedForDay.formatId}-${savedForDay.date}${savedForDay.slot > 1 ? `-${savedForDay.slot}` : ''}.png`,
           format: savedFormat,
           layout: savedForDay.layout,
           imageProvider: savedForDay.imageProvider,
@@ -241,6 +254,7 @@ export default function GeneratorPage() {
     if (loading) return;
     if (!topic.trim()) {
       setError('Escolha uma data comemorativa ou escreva o tema do post.');
+      document.getElementById('topic')?.focus();
       return;
     }
 
@@ -320,6 +334,7 @@ export default function GeneratorPage() {
       if (entry) {
         void savePost({
           date: entry.date,
+          slot: entry.slot,
           titulo: String(data.titulo).replace(/\*\*/g, ''),
           layout: data.layout,
           formatId: format.id,
@@ -337,7 +352,7 @@ export default function GeneratorPage() {
           if (failure) setError(`A arte foi gerada, mas não foi salva no banco: ${failure}`);
         });
       }
-      if (entry?.status === 'pendente') setEntryStatus(entry.date, 'gerado');
+      if (entry?.status === 'pendente') setEntryStatus(entry, 'gerado');
     } catch (err) {
       if (signal.aborted) return;
       setError(
@@ -362,7 +377,7 @@ export default function GeneratorPage() {
     if (autoParam !== '1' || !entry || autoStarted.current) return;
     autoStarted.current = true;
     // Tira o auto da URL para que recarregar a página não gere de novo
-    window.history.replaceState(null, '', `/?data=${entry.date}`);
+    window.history.replaceState(null, '', `/?data=${entry.date}&pos=${entry.slot}`);
     void generate();
     // generate é recriada a cada renderização; aqui só importa o momento em que o dia carrega
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -398,6 +413,47 @@ export default function GeneratorPage() {
         </p>
       )}
 
+      {!dataParam && pending.length > 0 && (
+        <section className="today-strip" aria-labelledby="today-title">
+          <h2 id="today-title" className="today-title">
+            Para postar
+          </h2>
+          <ul className="today-list">
+            {pending.map((e) => {
+              const p = parseISO(e.date)!;
+              const late = e.date < today;
+              const label = e.ocasioes[0] ?? e.objetivo;
+              return (
+                <li key={entryKey(e.date, e.slot)} className="today-item" data-when={e.date === today ? 'today' : late ? 'late' : 'soon'}>
+                  <div className="today-date" aria-hidden="true">
+                    <strong>{p.day}</strong>
+                    <span>{MONTH_NAMES[p.month].slice(0, 3)}</span>
+                  </div>
+                  <div className="today-body">
+                    <strong title={label}>{label}</strong>
+                    <span className="today-meta">
+                      <span className="badge" data-status={e.status}>
+                        {STATUS_LABELS[e.status]}
+                      </span>
+                      {e.date === today && <span className="badge badge-today">Hoje</span>}
+                      {late && <span className="badge badge-late">Atrasado</span>}
+                      <span className="sr-only">, {formatDay(e.date)}</span>
+                    </span>
+                  </div>
+                  {/* Link comum: recarrega a tela para começar este post do zero */}
+                  <a
+                    className={`btn btn-small ${e.status === 'pendente' ? 'btn-primary' : 'btn-quiet'}`}
+                    href={`/?data=${e.date}&pos=${e.slot}${e.status === 'pendente' ? '&auto=1' : ''}`}
+                  >
+                    {e.status === 'pendente' ? 'Gerar post' : 'Ver post'}
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
       <div className="workbench">
         <form className="controls" onSubmit={handleSubmit} noValidate>
           {entry && (
@@ -407,6 +463,15 @@ export default function GeneratorPage() {
                   <strong>Post de {formatDay(entry.date, true)}</strong>
                   <Link href="/calendario">Editar no calendário</Link>
                 </div>
+                {otherEntry && (
+                  <p className="hint">
+                    Este é o {entry.slot}º dos 2 posts do dia.{' '}
+                    {/* Link comum: recarrega a tela para começar o outro post do zero */}
+                    <a href={`/?data=${otherEntry.date}&pos=${otherEntry.slot}`}>
+                      Abrir o {otherEntry.slot}º post: {otherEntry.ocasioes[0] ?? otherEntry.objetivo}
+                    </a>
+                  </p>
+                )}
                 {entry.ocasioes.length > 1 && (
                   <div>
                     <p className="hint">Este dia tem várias datas. Use todas ou escolha uma:</p>
@@ -434,6 +499,9 @@ export default function GeneratorPage() {
 
           <div className="block">
             <label className="q" htmlFor="topic">
+              <span className="step-num" aria-hidden="true">
+                1
+              </span>
               Sobre o que é o post?
             </label>
             <input
@@ -477,7 +545,12 @@ export default function GeneratorPage() {
 
           <div className="block">
             <fieldset className="fs">
-              <legend className="q">Onde vai publicar?</legend>
+              <legend className="q">
+                <span className="step-num" aria-hidden="true">
+                  2
+                </span>
+                Onde vai publicar?
+              </legend>
               <div className="row" role="presentation">
                 {NETWORKS.map((n) => (
                   <label key={n.id} className="pick">
@@ -563,6 +636,7 @@ export default function GeneratorPage() {
                 </small>
               </p>
               <button type="submit" className="btn btn-primary" aria-disabled={loading}>
+                {loading && <span className="spinner" aria-hidden="true" />}
                 {loading ? 'Gerando…' : current ? 'Gerar de novo' : 'Gerar post'}
               </button>
             </div>
@@ -614,7 +688,13 @@ export default function GeneratorPage() {
 
                   {loading && (
                     <div className="sheet-loading">
-                      <span>{stepMessage}</span>
+                      <div className="sheet-loading-body">
+                        <span>{stepMessage}</span>
+                        <ol className="steps" aria-hidden="true">
+                          <li data-state={step === 'texto' ? 'now' : 'done'}>Texto</li>
+                          <li data-state={step === 'arte' ? 'now' : 'next'}>Arte</li>
+                        </ol>
+                      </div>
                     </div>
                   )}
 
@@ -668,7 +748,7 @@ export default function GeneratorPage() {
                   value={caption}
                   onChange={(e) => setCaption(e.target.value)}
                   onBlur={() => {
-                    if (entry) void updatePostCaption(entry.date, caption);
+                    if (entry) void updatePostCaption(entry.date, entry.slot, caption);
                   }}
                   aria-describedby="legenda-contador"
                 />

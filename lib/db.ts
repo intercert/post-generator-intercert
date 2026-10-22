@@ -1,5 +1,6 @@
 // Acesso ao banco para as rotas: a empresa atual e o tratamento padrão de erros.
 import { NextResponse } from 'next/server';
+import { MAX_POSTS_PER_DAY, parseSlot, type Slot } from '@/lib/calendar';
 import { getPrisma } from '@/lib/prisma';
 
 const DEFAULT_SLUG = 'default';
@@ -64,6 +65,15 @@ export async function handle(run: () => Promise<Response>): Promise<Response> {
     }
     return NextResponse.json({ error: 'Erro interno no servidor.' }, { status: 500 });
   }
+}
+
+/** Posição do post no dia, vinda de ?slot= (1 ou 2; sem o parâmetro vale 1). */
+export function slotOf(req: Request): Slot {
+  const raw = new URL(req.url).searchParams.get('slot');
+  if (raw === null) return 1;
+  const slot = parseSlot(raw);
+  if (!slot) throw new ApiError(`Posição inválida. Use um número de 1 a ${MAX_POSTS_PER_DAY}.`, 400);
+  return slot;
 }
 
 export async function jsonBody(req: Request): Promise<Record<string, unknown>> {

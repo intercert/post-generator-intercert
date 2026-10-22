@@ -3,17 +3,19 @@
 import { useEffect, useState } from 'react';
 import { apiJson, jsonRequest } from './api-client';
 import type { LayoutKind } from './brand';
+import { entryKey, type Slot } from './calendar';
 import { postImageUrl, type PostDetail, type PostMeta } from './post-shape';
 import { createRemoteStore, useRemote, type RemoteStatus } from './remote-store';
 
-// Posts gerados, guardados no banco por dia do calendário (rotas /api/posts). A arte final é um PNG
-// servido por /api/posts/AAAA-MM-DD/image.
+// Posts gerados, guardados no banco por dia e posição do calendário (rotas /api/posts). A arte final é um PNG
+// servido por /api/posts/AAAA-MM-DD/image?slot=N. Na tela, cada post é achado por entryKey(date, slot).
 
 export type PostView = PostMeta & { imageUrl: string };
 
 /** Dados do post a salvar; `image` é o PNG final. */
 export interface PostInput {
   date: string;
+  slot: Slot;
   titulo: string;
   layout: LayoutKind;
   formatId: string;
@@ -33,13 +35,13 @@ const EMPTY: Record<string, PostMeta> = {};
 
 export const postsStore = createRemoteStore<Record<string, PostMeta>>(EMPTY, async () => {
   const { posts } = await apiJson<{ posts: PostMeta[] }>('/api/posts', { cache: 'no-store' });
-  return Object.fromEntries(posts.map((p) => [p.date, p]));
+  return Object.fromEntries(posts.map((p) => [entryKey(p.date, p.slot), p]));
 });
 
-/** Posts salvos por data, com o endereço da imagem. */
+/** Posts salvos por entryKey(data, posição), com o endereço da imagem. */
 export function useSavedPosts(): Record<string, PostView> {
   const { data } = useRemote(postsStore);
-  return Object.fromEntries(Object.entries(data).map(([date, p]) => [date, { ...p, imageUrl: postImageUrl(p) }]));
+  return Object.fromEntries(Object.entries(data).map(([key, p]) => [key, { ...p, imageUrl: postImageUrl(p) }]));
 }
 
 export function usePostsStatus(): { status: RemoteStatus; error: string | null } {
@@ -48,33 +50,33 @@ export function usePostsStatus(): { status: RemoteStatus; error: string | null }
 }
 
 /** Busca os prompts completos de um post salvo (a lista traz só o resumo). */
-export function usePostDetail(date: string | undefined, savedAt: number | undefined): PostDetail | undefined {
+export function usePostDetail(date: string | undefined, slot: Slot | undefined, savedAt: number | undefined): PostDetail | undefined {
   const [loaded, setLoaded] = useState<{ key: string; detail: PostDetail } | null>(null);
-  const key = date && savedAt ? `${date}:${savedAt}` : '';
+  const key = date && slot && savedAt ? `${date}:${slot}:${savedAt}` : '';
 
   useEffect(() => {
-    if (!date || !key) return;
+    if (!date || !slot || !key) return;
     const controller = new AbortController();
-    apiJson<{ post: PostDetail }>(`/api/posts/${date}`, { cache: 'no-store', signal: controller.signal })
+    apiJson<{ post: PostDetail }>(`/api/posts/${date}?slot=${slot}`, { cache: 'no-store', signal: controller.signal })
       .then(({ post }) => setLoaded({ key, detail: post }))
       .catch(() => {
         // sem detalhes: a tela mostra só o que a lista traz
       });
     return () => controller.abort();
-  }, [date, key]);
+  }, [date, slot, key]);
 
   return loaded && loaded.key === key ? loaded.detail : undefined;
 }
 
-/** Salva (ou substitui) o post do dia. Devolve a mensagem de erro, ou null se deu certo. */
+/** Salva (ou substitui) o post do dia na posição indicada. Devolve a mensagem de erro, ou null se deu certo. */
 export async function savePost(input: PostInput): Promise<string | null> {
   const { image, ...fields } = input;
   const form = new FormData();
-  for (const [name, value] of Object.entries(fields)) form.set(name, value);
-  form.set('image', image, `post-${input.date}.png`);
+  for (const [name, value] of Object.entries(fields)) form.set(name, String(value));
+  form.set('image', image, `post-${input.date}-${input.slot}.png`);
 
   try {
-    await apiJson(`/api/posts/${input.date}`, { method: 'PUT', body: form });
+    await apiJson(`/api/posts/${input.date}?slot=${input.slot}`, { method: 'PUT', body: form });
     await postsStore.refresh();
     return null;
   } catch (err) {
@@ -82,22 +84,24 @@ export async function savePost(input: PostInput): Promise<string | null> {
   }
 }
 
-export async function deletePost(date: string): Promise<void> {
-  postsStore.set((current) => Object.fromEntries(Object.entries(current).filter(([d]) => d !== date)));
+export async function deletePost(date: string, slot: Slot): Promise<void> {
+  const key = entryKey(date, slot);
+  postsStore.set((current) => Object.fromEntries(Object.entries(current).filter(([k]) => k !== key)));
   try {
-    await apiJson(`/api/posts/${date}`, jsonRequest('DELETE'));
+    await apiJson(`/api/posts/${date}?slot=${slot}`, jsonRequest('DELETE'));
   } catch {
     await postsStore.refresh();
   }
 }
 
 /** Atualiza só a legenda de um post já salvo (a pessoa pode editá-la na tela). */
-export async function updatePostCaption(date: string, legenda: string): Promise<void> {
-  const current = postsStore.getSnapshot().data[date];
+export async function updatePostCaption(date: string, slot: Slot, legenda: string): Promise<void> {
+  const key = entryKey(date, slot);
+  const current = postsStore.getSnapshot().data[key];
   if (!current || current.legenda === legenda) return;
-  postsStore.set((all) => ({ ...all, [date]: { ...all[date], legenda } }));
+  postsStore.set((all) => ({ ...all, [key]: { ...all[key], legenda } }));
   try {
-    await apiJson(`/api/posts/${date}`, jsonRequest('PATCH', { legenda }));
+    await apiJson(`/api/posts/${date}?slot=${slot}`, jsonRequest('PATCH', { legenda }));
   } catch {
     await postsStore.refresh();
   }

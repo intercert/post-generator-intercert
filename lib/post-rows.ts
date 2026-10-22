@@ -1,10 +1,12 @@
 // Seleção e conversão das linhas de Post (servidor).
 import type { LayoutKind } from '@/lib/brand';
 import { LAYOUT_KINDS } from '@/lib/brand';
+import { parseSlot } from '@/lib/calendar';
 import type { PostDetail, PostMeta } from '@/lib/post-shape';
 
 export const postMetaSelect = {
   date: true,
+  slot: true,
   titulo: true,
   layout: true,
   formatId: true,
@@ -26,6 +28,7 @@ export const postDetailSelect = {
 
 type MetaRow = {
   date: string;
+  slot: number;
   titulo: string;
   layout: string;
   formatId: string;
@@ -39,6 +42,7 @@ type MetaRow = {
 export function toPostMeta(row: MetaRow): PostMeta {
   return {
     date: row.date,
+    slot: parseSlot(row.slot) ?? 1,
     titulo: row.titulo,
     layout: (LAYOUT_KINDS as readonly string[]).includes(row.layout) ? (row.layout as LayoutKind) : 'cartao',
     formatId: row.formatId,

@@ -21,11 +21,21 @@ export default function Modal({ title, description, onClose, onSubmit, footer, c
     if (dialog && !dialog.open) dialog.showModal();
   }, []);
 
+  // Só fecha pelo fundo se o clique começou nele; selecionar texto e soltar fora não deve fechar.
+  const pressedBackdrop = useRef(false);
+
   const inner = (
     <>
-      <header className="modal-head">
-        <h2>{title}</h2>
-        {description && <p className="hint">{description}</p>}
+      <header className="modal-head modal-head-bar">
+        <div>
+          <h2>{title}</h2>
+          {description && <p className="hint">{description}</p>}
+        </div>
+        <button type="button" className="modal-close" onClick={onClose} aria-label="Fechar">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
       </header>
       <div className="modal-body">{children}</div>
       <footer className="modal-foot">{footer}</footer>
@@ -37,6 +47,12 @@ export default function Modal({ title, description, onClose, onSubmit, footer, c
       ref={ref}
       className="modal"
       aria-label={title}
+      onMouseDown={(e) => {
+        pressedBackdrop.current = e.target === ref.current;
+      }}
+      onClick={(e) => {
+        if (pressedBackdrop.current && e.target === ref.current) onClose();
+      }}
       onCancel={(e) => {
         e.preventDefault();
         onClose();

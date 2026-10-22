@@ -1,7 +1,7 @@
 import { NextResponse, connection } from 'next/server';
 import { LAYOUT_KINDS } from '@/lib/brand';
 import { isValidDate } from '@/lib/calendar';
-import { ApiError, currentWorkspaceId, handle, jsonBody } from '@/lib/db';
+import { ApiError, currentWorkspaceId, handle, jsonBody, slotOf } from '@/lib/db';
 import { getPrisma } from '@/lib/prisma';
 import { postDetailSelect, toPostDetail } from '@/lib/post-rows';
 
@@ -18,14 +18,15 @@ async function dateOf(context: Context): Promise<string> {
 const clip = (value: FormDataEntryValue | null, max: number): string =>
   typeof value === 'string' ? value.slice(0, max) : '';
 
-/** Post salvo do dia, com os prompts completos (sem a imagem, que tem rota própria). */
-export async function GET(_req: Request, context: Context) {
+/** Post salvo do dia (posição em ?slot=), com os prompts completos (sem a imagem, que tem rota própria). */
+export async function GET(req: Request, context: Context) {
   await connection();
   return handle(async () => {
     const date = await dateOf(context);
+    const slot = slotOf(req);
     const workspaceId = await currentWorkspaceId();
     const row = await getPrisma().post.findUnique({
-      where: { workspaceId_date: { workspaceId, date } },
+      where: { workspaceId_date_slot: { workspaceId, date, slot } },
       select: postDetailSelect
     });
     if (!row) throw new ApiError('Este dia ainda não tem post salvo.', 404);
@@ -37,6 +38,7 @@ export async function GET(_req: Request, context: Context) {
 export async function PUT(req: Request, context: Context) {
   return handle(async () => {
     const date = await dateOf(context);
+    const slot = slotOf(req);
 
     let form: FormData;
     try {
@@ -70,12 +72,12 @@ export async function PUT(req: Request, context: Context) {
 
     const workspaceId = await currentWorkspaceId();
     const row = await getPrisma().post.upsert({
-      where: { workspaceId_date: { workspaceId, date } },
-      create: { workspaceId, date, ...data },
+      where: { workspaceId_date_slot: { workspaceId, date, slot } },
+      create: { workspaceId, date, slot, ...data },
       update: data,
       select: { updatedAt: true }
     });
-    return NextResponse.json({ date, savedAt: row.updatedAt.getTime() });
+    return NextResponse.json({ date, slot, savedAt: row.updatedAt.getTime() });
   });
 }
 
@@ -83,12 +85,13 @@ export async function PUT(req: Request, context: Context) {
 export async function PATCH(req: Request, context: Context) {
   return handle(async () => {
     const date = await dateOf(context);
+    const slot = slotOf(req);
     const body = await jsonBody(req);
     if (typeof body.legenda !== 'string') throw new ApiError('Envie a legenda em "legenda".', 400);
 
     const workspaceId = await currentWorkspaceId();
     const { count } = await getPrisma().post.updateMany({
-      where: { workspaceId, date },
+      where: { workspaceId, date, slot },
       data: { legenda: body.legenda.slice(0, 5000) }
     });
     if (count === 0) throw new ApiError('Este dia ainda não tem post salvo.', 404);
@@ -96,11 +99,12 @@ export async function PATCH(req: Request, context: Context) {
   });
 }
 
-export async function DELETE(_req: Request, context: Context) {
+export async function DELETE(req: Request, context: Context) {
   return handle(async () => {
     const date = await dateOf(context);
+    const slot = slotOf(req);
     const workspaceId = await currentWorkspaceId();
-    await getPrisma().post.deleteMany({ where: { workspaceId, date } });
+    await getPrisma().post.deleteMany({ where: { workspaceId, date, slot } });
     return NextResponse.json({ ok: true });
   });
 }

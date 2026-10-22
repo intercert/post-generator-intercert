@@ -16,6 +16,7 @@ datasource db {
 enum EntryStatus {
   pendente
   gerado
+  agendado
   postado
 }
 
@@ -42,12 +43,14 @@ model Brand {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
-/// Um dia planejado no calendário (um por data).
+/// Um post planejado no calendário. Cada data aceita até 2 (slot 1 e 2), por exemplo Natal e aniversário da cidade.
 model CalendarEntry {
   id          String      @id @default(cuid())
   workspaceId String
   /// YYYY-MM-DD
   date        String      @db.Char(10)
+  /// Posição do post no dia: 1 ou 2
+  slot        Int         @default(1)
   /// JSON: lista de datas comemorativas
   ocasioes    String      @db.Text
   objetivo    String      @db.VarChar(255)
@@ -58,16 +61,18 @@ model CalendarEntry {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([workspaceId, date])
+  @@unique([workspaceId, date, slot])
   @@index([workspaceId, status])
 }
 
-/// O post gerado de um dia: arte final (PNG) e tudo o que serve para reaproveitar em outra IA.
+/// O post gerado de um item do calendário (data + posição): arte final (PNG) e tudo o que serve para reaproveitar em outra IA.
 model Post {
   id            String   @id @default(cuid())
   workspaceId   String
   /// YYYY-MM-DD, o mesmo dia do calendário
   date          String   @db.Char(10)
+  /// Posição do post no dia: 1 ou 2
+  slot          Int      @default(1)
   titulo        String   @db.VarChar(255)
   layout        String   @db.VarChar(20)
   formatId      String   @db.VarChar(80)
@@ -87,5 +92,5 @@ model Post {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([workspaceId, date])
+  @@unique([workspaceId, date, slot])
 }
